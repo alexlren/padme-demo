@@ -2,6 +2,8 @@
 
 Simple desktop implementation of padme core
 
+<img src="/docs/demo.gif" width="300"/>
+
 ## Run
 
 ```
