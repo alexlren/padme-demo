@@ -1,12 +1,81 @@
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::thread::sleep;
+use std::thread;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use log::info;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal;
+use log::*;
 use minifb::{Key, Window, WindowOptions, Scale};
-use padme_core::{FRAME_HEIGHT, FRAME_WIDTH, Button, Rom, System, Pixel, Screen, SerialOutput};
+use padme_core::{FRAME_HEIGHT, FRAME_WIDTH, Button, Rom, System, Pixel, Screen, SerialOutput, AudioSpeaker, AUDIO_SAMPLE_RATE};
+
+fn play_frame<T: cpal::Sample>(outbuffer: &mut[T], sample_buf: &Arc<Mutex<Vec<f32>>>) {
+    let mut sample_buf = sample_buf.lock().unwrap();
+    let min = std::cmp::min(outbuffer.len(), sample_buf.len());
+
+    for (i, s) in sample_buf.drain(..min).enumerate() {
+        outbuffer[i] = cpal::Sample::from(&s);
+    }
+}
+
+fn create_stream(sample_buf: &Arc<Mutex<Vec<f32>>>) -> cpal::Stream {
+    let host = cpal::default_host();
+    let device = host.default_output_device().unwrap();
+    let sample_rate = cpal::SampleRate(AUDIO_SAMPLE_RATE);
+    let mut supported_configs = device.supported_output_configs().unwrap();
+    // Find a config that supports:
+    // - stereo
+    // - float 32
+    // - sample rate = 48kHz
+    let supported_config = supported_configs.find(| cnf | cnf.channels() == 2
+                                                  && sample_rate >= cnf.min_sample_rate()
+                                                  && sample_rate <= cnf.max_sample_rate()
+                                                  && cnf.sample_format() == cpal::SampleFormat::F32).unwrap();
+    let supported_config = supported_config.with_sample_rate(sample_rate);
+    let sample_buf = sample_buf.clone();
+    let stream = device.build_output_stream(
+        &supported_config.config(),
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| play_frame(data, &sample_buf),
+        |err| error!("error while playing audio: {}", err),
+    ).unwrap();
+
+    stream.play().unwrap();
+
+    stream
+}
+
+pub struct AudioPlayer {
+    /// A dynamic buffer of samples
+    sample_buf: Arc<Mutex<Vec<f32>>>,
+    /// Keep the stream alive
+    pub stream: cpal::Stream,
+}
+
+impl AudioPlayer {
+    pub fn new() -> Self {
+        let sample_buf = Arc::new(Mutex::new(Vec::new()));
+        let stream = create_stream(&sample_buf);
+
+        Self {
+            sample_buf,
+            stream,
+        }
+    }
+}
+
+impl AudioSpeaker for AudioPlayer {
+    fn set_samples(&mut self, left: f32, right: f32) {
+        let mut sample_buf = self.sample_buf.lock().unwrap();
+        let max_len = ((AUDIO_SAMPLE_RATE * 300) / 1000) as usize;
+        // stop if the buffer has more than 300ms of samples
+        if sample_buf.len() < max_len {
+            sample_buf.push(left);
+            sample_buf.push(right);
+        }
+    }
+}
 
 pub struct Lcd {
     framebuffer: [u32; FRAME_WIDTH * FRAME_HEIGHT],
@@ -80,7 +149,10 @@ fn main() {
     info!("{:?}", rom);
 
     let title = rom.title().unwrap_or(&String::default()).to_owned();
-    let mut emu = System::new(rom, Lcd::new(title), SerialConsole::new("/tmp/padme_serial.log"));
+    let mut emu = System::new(rom,
+                              Lcd::new(title),
+                              SerialConsole::new("/tmp/padme_serial.log"),
+                              AudioPlayer::new());
 
     emu.set_frame_rate(60);
 
@@ -107,11 +179,12 @@ fn main() {
         emu.set_button(Button::Left, left_pressed);
         emu.set_button(Button::Right, right_pressed);
 
+
         let frame_time = t0.elapsed();
         let min_frame_time = emu.min_frame_time();
 
         if frame_time < min_frame_time {
-            sleep(min_frame_time - frame_time);
+            thread::sleep(min_frame_time - frame_time);
         }
     }
 }

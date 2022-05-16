@@ -10,6 +10,7 @@ padme-core = { path = "./core" }
 log = "0.4"
 env_logger = "0.9"
 minifb = "0.22"
+cpal = "0.13.5"
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.
